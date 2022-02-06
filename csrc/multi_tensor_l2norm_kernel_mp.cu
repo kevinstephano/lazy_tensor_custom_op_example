@@ -157,63 +157,68 @@ std::tuple<at::Tensor, at::Tensor> multi_tensor_l2norm_mp_cuda(
   std::vector<std::vector<at::Tensor>> tensor_lists,
   at::optional<bool> per_tensor_python)
 {
-  bool per_tensor = per_tensor_python.has_value() ? per_tensor_python.value() : false;
 
-  auto float_options = tensor_lists[0][0].options().dtype(at::kFloat);
-  auto output = at::zeros({320}, float_options);
-
-  at::Tensor output_per_tensor;
-  at::Tensor ret_per_tensor;
-
-  int ntensors = tensor_lists[0].size();
-  int max_chunks_per_tensor = -1;
-
-  if(per_tensor)
-  {
-    for(int t = 0; t < ntensors; t++)
+  if (tensor_lists[0][0].device().type() == c10::kLazy) {
+    return lazyMultiTensorL2Norm(chunk_size, noop_flag, tensor_lists, per_tensor_python);
+  } else {
+    bool per_tensor = per_tensor_python.has_value() ? per_tensor_python.value() : false;
+ 
+    auto float_options = tensor_lists[0][0].options().dtype(at::kFloat);
+    auto output = at::zeros({320}, float_options);
+ 
+    at::Tensor output_per_tensor;
+    at::Tensor ret_per_tensor;
+ 
+    int ntensors = tensor_lists[0].size();
+    int max_chunks_per_tensor = -1;
+ 
+    if(per_tensor)
     {
-      int max_chunks_this_tensor = (tensor_lists[0][t].numel() + chunk_size - 1)/chunk_size;
-      if(max_chunks_this_tensor > max_chunks_per_tensor)
-        max_chunks_per_tensor = max_chunks_this_tensor;
+      for(int t = 0; t < ntensors; t++)
+      {
+        int max_chunks_this_tensor = (tensor_lists[0][t].numel() + chunk_size - 1)/chunk_size;
+        if(max_chunks_this_tensor > max_chunks_per_tensor)
+          max_chunks_per_tensor = max_chunks_this_tensor;
+      }
+      output_per_tensor = at::zeros({ntensors*max_chunks_per_tensor}, float_options);
+      ret_per_tensor = at::empty({ntensors}, float_options);
     }
-    output_per_tensor = at::zeros({ntensors*max_chunks_per_tensor}, float_options);
-    ret_per_tensor = at::empty({ntensors}, float_options);
-  }
-  else
-  {
-    ret_per_tensor = at::empty({0}, float_options);
-  }
-
-  DISPATCH_FLOAT_AND_HALF(tensor_lists[0][0].scalar_type(), 0, "multi_tensor_l2norm_mp_cuda",
-    multi_tensor_apply<1>(
-      BLOCK_SIZE,
-      chunk_size,
-      noop_flag,
-      tensor_lists,
-      L2NormFunctor<scalar_t_0>(),
+    else
+    {
+      ret_per_tensor = at::empty({0}, float_options);
+    }
+ 
+    DISPATCH_FLOAT_AND_HALF(tensor_lists[0][0].scalar_type(), 0, "multi_tensor_l2norm_mp_cuda",
+      multi_tensor_apply<1>(
+        BLOCK_SIZE,
+        chunk_size,
+        noop_flag,
+        tensor_lists,
+        L2NormFunctor<scalar_t_0>(),
+        output.data_ptr<float>(),
+        per_tensor ? output_per_tensor.data_ptr<float>() : nullptr,
+        per_tensor,
+        max_chunks_per_tensor);)
+ 
+    AT_CUDA_CHECK(cudaGetLastError());
+    // AT_CUDA_CHECK(cudaDeviceSynchronize());
+ 
+    // This involves one more small kernel launches, but will be negligible end to end.
+    // I could get rid of these by hacking the functor + multi tensor harness with persistence
+    // logic, but keeping it simple for now
+    auto ret = at::empty({1}, output.options());
+    const at::cuda::OptionalCUDAGuard device_guard(device_of(output));
+    auto stream = at::cuda::getCurrentCUDAStream();
+    cleanup<<<per_tensor ? ntensors : 1, 512, 0, stream>>>(
       output.data_ptr<float>(),
       per_tensor ? output_per_tensor.data_ptr<float>() : nullptr,
+      ret.data_ptr<float>(),
+      per_tensor ? ret_per_tensor.data_ptr<float>() : nullptr,
       per_tensor,
-      max_chunks_per_tensor);)
-
-  AT_CUDA_CHECK(cudaGetLastError());
-  // AT_CUDA_CHECK(cudaDeviceSynchronize());
-
-  // This involves one more small kernel launches, but will be negligible end to end.
-  // I could get rid of these by hacking the functor + multi tensor harness with persistence
-  // logic, but keeping it simple for now
-  auto ret = at::empty({1}, output.options());
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(output));
-  auto stream = at::cuda::getCurrentCUDAStream();
-  cleanup<<<per_tensor ? ntensors : 1, 512, 0, stream>>>(
-    output.data_ptr<float>(),
-    per_tensor ? output_per_tensor.data_ptr<float>() : nullptr,
-    ret.data_ptr<float>(),
-    per_tensor ? ret_per_tensor.data_ptr<float>() : nullptr,
-    per_tensor,
-    max_chunks_per_tensor, noop_flag.data_ptr<int>());
-
-  return std::tuple<at::Tensor, at::Tensor>(ret, ret_per_tensor);
+      max_chunks_per_tensor, noop_flag.data_ptr<int>());
+ 
+    return std::tuple<at::Tensor, at::Tensor>(ret, ret_per_tensor);
+  }
 }
 
 TORCH_LIBRARY(my_ops, m) {
