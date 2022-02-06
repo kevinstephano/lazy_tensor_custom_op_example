@@ -4,6 +4,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/Exceptions.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <torch/csrc/lazy/ts_backend/ops/optim.h>
 // Another possibility:
 // #include <torch/all.h>
 
@@ -159,7 +160,7 @@ std::tuple<at::Tensor, at::Tensor> multi_tensor_l2norm_mp_cuda(
 {
 
   if (tensor_lists[0][0].device().type() == c10::kLazy) {
-    return lazyMultiTensorL2Norm(chunk_size, noop_flag, tensor_lists, per_tensor_python);
+    return torch::lazy::lazyMultiTensorL2Norm(chunk_size, noop_flag, tensor_lists, per_tensor_python);
   } else {
     bool per_tensor = per_tensor_python.has_value() ? per_tensor_python.value() : false;
  
